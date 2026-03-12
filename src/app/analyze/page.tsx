@@ -29,6 +29,15 @@ type WorkLog = {
   jsonData?: unknown;
 };
 
+type DetailPreviewProps = {
+  logs: WorkLog[];
+  aiAnalysis: ProjectAIAnalysis | null;
+  totalFilesCount: number;
+  codeFilesCount: number;
+  filteredOutCount: number;
+  onClose: () => void;
+};
+
 function detectLanguageByPath(path: string): string {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
 
@@ -85,6 +94,36 @@ function truncateJsonLongFields(value: unknown, maxChars = 500): unknown {
   }
 
   return value;
+}
+
+function buildAnalysisSummary(analysis: ProjectAIAnalysis): string {
+  const langs = analysis.mainLanguages
+    .slice(0, 3)
+    .map((item) => `${item.language}(${Math.round(item.confidence * 100)}%)`)
+    .join("、");
+  const tags = analysis.techStackTags.slice(0, 5).join("、");
+  const entries = analysis.possibleEntryFiles
+    .slice(0, 3)
+    .map((item) => item.path)
+    .join("、");
+
+  return [
+    langs ? `主要语言：${langs}` : "主要语言：未识别",
+    tags ? `技术栈：${tags}` : "技术栈：未识别",
+    entries ? `候选入口：${entries}` : "候选入口：未识别",
+  ].join("；");
+}
+
+function buildAIDetailMessage(debug: AIAnalysisDebug, analysis: ProjectAIAnalysis): string {
+  if (!debug.enabled) {
+    return "未调用在线 AI，使用本地规则分析（常见原因：未配置 OPENAI_API_KEY 或无可分析代码文件）。";
+  }
+
+  if (debug.usedFallback) {
+    return `在线 AI 调用未得到可用结果，已自动切换到本地规则分析。原因码：${debug.reason}。分析输出为：${buildAnalysisSummary(analysis)}`;
+  }
+
+  return `在线 AI 调用成功。已输出结构化结论：${buildAnalysisSummary(analysis)}`;
 }
 
 type TreeNodeProps = {
@@ -145,6 +184,112 @@ function TreeNode({ node, selectedPath, onSelectFile, level = 0 }: TreeNodeProps
   );
 }
 
+function DetailPreviewModal({
+  logs,
+  aiAnalysis,
+  totalFilesCount,
+  codeFilesCount,
+  filteredOutCount,
+  onClose,
+}: DetailPreviewProps) {
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/90 p-4 backdrop-blur md:p-8">
+      <div className="mx-auto flex h-full w-full max-w-7xl flex-col rounded-2xl border border-slate-700 bg-slate-900">
+        <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3 md:px-6">
+          <h2 className="text-lg font-semibold text-white">分析预览窗口（全屏）</h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg bg-cyan-500 px-3 py-1.5 text-sm font-semibold text-slate-950 hover:bg-cyan-400"
+          >
+            缩小返回
+          </button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-4 md:grid-cols-[1.1fr_1fr] md:p-6">
+          <section className="min-h-0 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-semibold text-white">工作日志</h3>
+              <span className="text-xs text-slate-500">{logs.length} 条</span>
+            </div>
+            <div className="mt-3 h-[calc(100%-2.5rem)] space-y-3 overflow-auto pr-1">
+              {!logs.length ? (
+                <p className="text-sm text-slate-500">暂无日志</p>
+              ) : (
+                logs.map((log) => (
+                  <div key={log.id} className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                    <p className="text-xs text-slate-500">{log.timestamp}</p>
+                    <p
+                      className={`mt-1 text-sm ${
+                        log.level === "error"
+                          ? "text-rose-400"
+                          : log.level === "success"
+                            ? "text-emerald-400"
+                            : "text-cyan-300"
+                      }`}
+                    >
+                      {log.title}
+                    </p>
+                    <p className="mt-1 text-sm text-slate-300">{log.message}</p>
+                    {log.jsonData ? (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs text-slate-400">
+                          展开查看 JSON
+                        </summary>
+                        <pre className="mt-2 overflow-auto rounded-md border border-slate-800 bg-slate-950 p-3 text-xs leading-5 text-slate-300">
+                          {JSON.stringify(truncateJsonLongFields(log.jsonData, 500), null, 2)}
+                        </pre>
+                      </details>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+
+          <section className="min-h-0 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
+            <h3 className="text-base font-semibold text-white">AI 分析详情</h3>
+            {!aiAnalysis ? (
+              <p className="mt-3 text-sm text-slate-500">暂无 AI 分析结果</p>
+            ) : (
+              <div className="mt-3 h-[calc(100%-2.5rem)] space-y-4 overflow-auto pr-1">
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
+                  <p>文件总数: {totalFilesCount}</p>
+                  <p>代码文件: {codeFilesCount}</p>
+                  <p>过滤文件: {filteredOutCount}</p>
+                  <p>模型: {aiAnalysis.model}</p>
+                </div>
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                  <p className="text-sm text-slate-400">主要语言</p>
+                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
+                    {JSON.stringify(aiAnalysis.mainLanguages, null, 2)}
+                  </pre>
+                </div>
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                  <p className="text-sm text-slate-400">技术栈标签</p>
+                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
+                    {JSON.stringify(aiAnalysis.techStackTags, null, 2)}
+                  </pre>
+                </div>
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                  <p className="text-sm text-slate-400">可能入口文件</p>
+                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
+                    {JSON.stringify(aiAnalysis.possibleEntryFiles, null, 2)}
+                  </pre>
+                </div>
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                  <p className="text-sm text-slate-400">总结</p>
+                  <p className="mt-2 text-sm text-slate-300">{aiAnalysis.summary}</p>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AnalyzeContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -163,6 +308,7 @@ function AnalyzeContent() {
   const [filteredOutCount, setFilteredOutCount] = useState(0);
   const [aiAnalysis, setAIAnalysis] = useState<ProjectAIAnalysis | null>(null);
   const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
+  const [showDetailPreview, setShowDetailPreview] = useState(false);
 
   const hasTree = tree.length > 0;
   const selectedLanguage = useMemo(
@@ -253,12 +399,25 @@ function AnalyzeContent() {
       addLog({
         level: result.aiDebug.usedFallback ? "info" : "success",
         title: "AI 分析结果",
-        message: result.aiDebug.usedFallback
-          ? `使用兜底分析（原因: ${result.aiDebug.reason}）。`
-          : "AI 分析完成并返回结构化结果。",
+        message: buildAIDetailMessage(result.aiDebug, result.aiAnalysis),
         jsonData: {
           debug: result.aiDebug,
           result: result.aiAnalysis,
+        },
+      });
+      addLog({
+        level: "info",
+        title: "AI 调用详情",
+        message: `请求包含模型、指令、文件采样列表；响应包含结构化字段(mainLanguages/techStackTags/possibleEntryFiles/summary)。当前原因码：${result.aiDebug.reason}。`,
+        jsonData: {
+          explanation: {
+            request:
+              "请求中会包含：模型参数、系统指令、用户提示词、采样后的代码文件路径列表。",
+            response:
+              "响应中应包含：主要语言(mainLanguages)、技术栈标签(techStackTags)、可能入口文件(possibleEntryFiles)、总结(summary)。",
+          },
+          request: result.aiDebug.request,
+          response: result.aiDebug.response,
         },
       });
       setRepoUrl(normalizedRepo);
@@ -327,7 +486,16 @@ function AnalyzeContent() {
           <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
             <div className="flex items-center justify-between">
               <p className="text-xs uppercase tracking-[0.2em] text-cyan-400">工作日志</p>
-              <span className="text-xs text-slate-500">{workLogs.length} 条</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-slate-500">{workLogs.length} 条</span>
+                <button
+                  type="button"
+                  onClick={() => setShowDetailPreview(true)}
+                  className="rounded-md border border-cyan-500/60 px-2 py-0.5 text-[11px] text-cyan-300 hover:bg-cyan-500/10"
+                >
+                  放大
+                </button>
+              </div>
             </div>
             <div className="mt-2 max-h-48 space-y-2 overflow-auto pr-1">
               {!workLogs.length ? (
@@ -517,6 +685,16 @@ function AnalyzeContent() {
           </div>
         </section>
       </div>
+      {showDetailPreview ? (
+        <DetailPreviewModal
+          logs={workLogs}
+          aiAnalysis={aiAnalysis}
+          totalFilesCount={totalFilesCount}
+          codeFilesCount={codeFilesCount}
+          filteredOutCount={filteredOutCount}
+          onClose={() => setShowDetailPreview(false)}
+        />
+      ) : null}
     </main>
   );
 }
