@@ -1,6 +1,7 @@
 "use client";
 
 import { isValidGitHubRepoUrl } from "@/lib/github-url";
+import type { ProjectAIAnalysis } from "@/types/analysis";
 import type { FileTreeNode } from "@/types/repository";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useState } from "react";
@@ -12,6 +13,8 @@ type RepoAnalyzeResult = {
   repo: string;
   defaultBranch: string;
   tree: FileTreeNode[];
+  codeFilesCount: number;
+  aiAnalysis: ProjectAIAnalysis;
 };
 
 function detectLanguageByPath(path: string): string {
@@ -117,6 +120,8 @@ function AnalyzeContent() {
   const [selectedPath, setSelectedPath] = useState("");
   const [code, setCode] = useState("");
   const [codeLoading, setCodeLoading] = useState(false);
+  const [codeFilesCount, setCodeFilesCount] = useState(0);
+  const [aiAnalysis, setAIAnalysis] = useState<ProjectAIAnalysis | null>(null);
 
   const hasTree = tree.length > 0;
   const selectedLanguage = useMemo(
@@ -134,6 +139,8 @@ function AnalyzeContent() {
 
     setAnalyzeLoading(true);
     setTree([]);
+    setCodeFilesCount(0);
+    setAIAnalysis(null);
     setSelectedPath("");
     setCode("");
 
@@ -149,6 +156,8 @@ function AnalyzeContent() {
 
       setTree(result.tree);
       setBranch(result.defaultBranch);
+      setCodeFilesCount(result.codeFilesCount);
+      setAIAnalysis(result.aiAnalysis);
       router.replace(`/analyze?repo=${encodeURIComponent(repoUrl)}`);
     } catch (requestError) {
       const message =
@@ -227,6 +236,68 @@ function AnalyzeContent() {
           <div className="mt-6 rounded-lg border border-dashed border-slate-700 p-3 text-xs text-slate-500">
             预留区域：后续可展示依赖信息、代码统计、风险提示等。
           </div>
+
+          {aiAnalysis ? (
+            <div className="mt-4 space-y-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-cyan-400">AI 分析结果</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  代码文件数: {codeFilesCount} | 模型: {aiAnalysis.model}
+                </p>
+              </div>
+
+              <div>
+                <p className="text-xs text-slate-400">主要语言</p>
+                <div className="mt-1 space-y-1 text-sm">
+                  {aiAnalysis.mainLanguages.length ? (
+                    aiAnalysis.mainLanguages.map((item) => (
+                      <p key={item.language} className="text-slate-200">
+                        {item.language} ({Math.round(item.confidence * 100)}%)
+                      </p>
+                    ))
+                  ) : (
+                    <p className="text-slate-500">暂无</p>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs text-slate-400">技术栈标签</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {aiAnalysis.techStackTags.length ? (
+                    aiAnalysis.techStackTags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="rounded-md border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 text-xs text-cyan-200"
+                      >
+                        {tag}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-xs text-slate-500">暂无</span>
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs text-slate-400">可能入口文件</p>
+                <div className="mt-1 space-y-2 text-xs">
+                  {aiAnalysis.possibleEntryFiles.length ? (
+                    aiAnalysis.possibleEntryFiles.map((item) => (
+                      <div key={item.path} className="rounded-md border border-slate-800 bg-slate-900 p-2">
+                        <p className="truncate text-slate-200">{item.path}</p>
+                        <p className="mt-1 text-slate-500">{item.reason}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-slate-500">暂无</p>
+                  )}
+                </div>
+              </div>
+
+              <p className="text-xs leading-5 text-slate-400">{aiAnalysis.summary}</p>
+            </div>
+          ) : null}
 
           {error ? <p className="mt-4 text-sm text-rose-400">{error}</p> : null}
         </aside>

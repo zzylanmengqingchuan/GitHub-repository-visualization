@@ -28,6 +28,13 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "文件读取失败，请稍后重试。";
-    return NextResponse.json({ message }, { status: 500 });
+    const status = message.includes("不存在")
+      ? 404
+      : message.includes("访问受限")
+        ? 403
+        : message.includes("无法连接 GitHub API")
+          ? 502
+          : 500;
+    return NextResponse.json({ message }, { status });
   }
 }

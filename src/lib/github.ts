@@ -42,10 +42,17 @@ function getGitHubHeaders(): HeadersInit {
 }
 
 async function githubRequest<T>(url: string): Promise<T> {
-  const response = await fetch(url, {
-    headers: getGitHubHeaders(),
-    cache: "no-store",
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      headers: getGitHubHeaders(),
+      cache: "no-store",
+    });
+  } catch {
+    throw new Error(
+      "服务端无法连接 GitHub API，请检查网络或代理设置后重试。",
+    );
+  }
 
   if (!response.ok) {
     if (response.status === 404) {
