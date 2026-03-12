@@ -4,11 +4,14 @@ export type GitHubRepoRef = {
 };
 
 const GITHUB_REPO_URL_PATTERN =
-  /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s?#]+)(?:\/|$)/i;
+  /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s?#]+)(?:\/|$)/i;
+const GITHUB_REPO_SHORTHAND_PATTERN = /^([^/\s]+)\/([^/\s?#]+)$/i;
 
 export function parseGitHubRepoUrl(url: string): GitHubRepoRef | null {
   const normalizedUrl = url.trim();
-  const match = normalizedUrl.match(GITHUB_REPO_URL_PATTERN);
+  const match =
+    normalizedUrl.match(GITHUB_REPO_URL_PATTERN) ??
+    normalizedUrl.match(GITHUB_REPO_SHORTHAND_PATTERN);
 
   if (!match) {
     return null;
@@ -26,4 +29,12 @@ export function parseGitHubRepoUrl(url: string): GitHubRepoRef | null {
 
 export function isValidGitHubRepoUrl(url: string): boolean {
   return parseGitHubRepoUrl(url) !== null;
+}
+
+export function normalizeGitHubRepoInput(input: string): string | null {
+  const parsed = parseGitHubRepoUrl(input);
+  if (!parsed) {
+    return null;
+  }
+  return `https://github.com/${parsed.owner}/${parsed.repo}`;
 }

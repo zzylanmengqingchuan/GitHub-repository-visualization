@@ -1,4 +1,4 @@
-import type { ProjectAIAnalysis } from "@/types/analysis";
+import type { ProjectAIAnalysis, ProjectAIAnalysisResult } from "@/types/analysis";
 import type { FileTreeNode } from "@/types/repository";
 import type { EntryFileInsight, LanguageInsight } from "@/types/analysis";
 
@@ -140,6 +140,25 @@ export function extractCodeFilePaths(tree: FileTreeNode[]): string[] {
 
   walk(tree);
   return paths;
+}
+
+export function countAllFiles(tree: FileTreeNode[]): number {
+  let count = 0;
+
+  function walk(nodes: FileTreeNode[]) {
+    for (const node of nodes) {
+      if (node.type === "file") {
+        count += 1;
+        continue;
+      }
+      if (node.children?.length) {
+        walk(node.children);
+      }
+    }
+  }
+
+  walk(tree);
+  return count;
 }
 
 function clampConfidence(value: unknown): number {
@@ -289,19 +308,37 @@ function buildHeuristicAnalysis(codeFiles: string[]): ProjectAIAnalysis {
 export async function analyzeProjectFromFileList(
   repoUrl: string,
   codeFiles: string[],
-): Promise<ProjectAIAnalysis> {
+): Promise<ProjectAIAnalysisResult> {
   const fallback = buildHeuristicAnalysis(codeFiles);
 
   if (!codeFiles.length) {
     return {
-      ...fallback,
-      summary: "仓库中未检测到可分析的代码文件。",
+      analysis: {
+        ...fallback,
+        summary: "仓库中未检测到可分析的代码文件。",
+      },
+      debug: {
+        enabled: false,
+        usedFallback: true,
+        reason: "no_code_files",
+        request: null,
+        response: null,
+      },
     };
   }
 
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return fallback;
+    return {
+      analysis: fallback,
+      debug: {
+        enabled: false,
+        usedFallback: true,
+        reason: "missing_openai_api_key",
+        request: null,
+        response: null,
+      },
+    };
   }
 
   const model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
@@ -319,6 +356,23 @@ export async function analyzeProjectFromFileList(
     sampledFiles.join("\n"),
   ].join("\n\n");
 
+  const requestPayload = {
+    model,
+    temperature: 0.1,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content:
+          "You are a precise software architecture analyst. Return strict JSON only.",
+      },
+      {
+        role: "user",
+        content: prompt,
+      },
+    ],
+  };
+
   try {
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -326,27 +380,21 @@ export async function analyzeProjectFromFileList(
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        model,
-        temperature: 0.1,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a precise software architecture analyst. Return strict JSON only.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-      }),
+      body: JSON.stringify(requestPayload),
       cache: "no-store",
     });
 
     if (!response.ok) {
-      return fallback;
+      return {
+        analysis: fallback,
+        debug: {
+          enabled: true,
+          usedFallback: true,
+          reason: `openai_http_${response.status}`,
+          request: requestPayload,
+          response: { status: response.status },
+        },
+      };
     }
 
     const data = (await response.json()) as {
@@ -354,7 +402,16 @@ export async function analyzeProjectFromFileList(
     };
     const content = data.choices?.[0]?.message?.content;
     if (!content) {
-      return fallback;
+      return {
+        analysis: fallback,
+        debug: {
+          enabled: true,
+          usedFallback: true,
+          reason: "empty_ai_content",
+          request: requestPayload,
+          response: data,
+        },
+      };
     }
 
     const parsed = JSON.parse(content) as unknown;
@@ -367,8 +424,28 @@ export async function analyzeProjectFromFileList(
       model,
     });
 
-    return sanitized;
+    return {
+      analysis: sanitized,
+      debug: {
+        enabled: true,
+        usedFallback: false,
+        reason: "ok",
+        request: requestPayload,
+        response: {
+          raw: parsed,
+        },
+      },
+    };
   } catch {
-    return fallback;
+    return {
+      analysis: fallback,
+      debug: {
+        enabled: true,
+        usedFallback: true,
+        reason: "openai_call_exception",
+        request: requestPayload,
+        response: null,
+      },
+    };
   }
 }

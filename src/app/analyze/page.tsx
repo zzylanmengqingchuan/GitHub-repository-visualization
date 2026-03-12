@@ -1,7 +1,7 @@
 "use client";
 
-import { isValidGitHubRepoUrl } from "@/lib/github-url";
-import type { ProjectAIAnalysis } from "@/types/analysis";
+import { normalizeGitHubRepoInput } from "@/lib/github-url";
+import type { AIAnalysisDebug, ProjectAIAnalysis } from "@/types/analysis";
 import type { FileTreeNode } from "@/types/repository";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useState } from "react";
@@ -13,8 +13,20 @@ type RepoAnalyzeResult = {
   repo: string;
   defaultBranch: string;
   tree: FileTreeNode[];
+  totalFilesCount: number;
   codeFilesCount: number;
+  filteredOutCount: number;
   aiAnalysis: ProjectAIAnalysis;
+  aiDebug: AIAnalysisDebug;
+};
+
+type WorkLog = {
+  id: number;
+  timestamp: string;
+  title: string;
+  message: string;
+  level: "info" | "success" | "error";
+  jsonData?: unknown;
 };
 
 function detectLanguageByPath(path: string): string {
@@ -47,6 +59,32 @@ function detectLanguageByPath(path: string): string {
   };
 
   return map[extension] ?? "text";
+}
+
+function truncateJsonLongFields(value: unknown, maxChars = 500): unknown {
+  if (typeof value === "string") {
+    if (value.length <= maxChars) {
+      return value;
+    }
+    const truncated = value.slice(0, maxChars);
+    const remaining = value.slice(maxChars);
+    const remainingBytes = new TextEncoder().encode(remaining).length;
+    return `${truncated}···(后续还有${remainingBytes}字节)`;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => truncateJsonLongFields(item, maxChars));
+  }
+
+  if (value && typeof value === "object") {
+    const output: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      output[key] = truncateJsonLongFields(item, maxChars);
+    }
+    return output;
+  }
+
+  return value;
 }
 
 type TreeNodeProps = {
@@ -120,8 +158,11 @@ function AnalyzeContent() {
   const [selectedPath, setSelectedPath] = useState("");
   const [code, setCode] = useState("");
   const [codeLoading, setCodeLoading] = useState(false);
+  const [totalFilesCount, setTotalFilesCount] = useState(0);
   const [codeFilesCount, setCodeFilesCount] = useState(0);
+  const [filteredOutCount, setFilteredOutCount] = useState(0);
   const [aiAnalysis, setAIAnalysis] = useState<ProjectAIAnalysis | null>(null);
+  const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
 
   const hasTree = tree.length > 0;
   const selectedLanguage = useMemo(
@@ -129,24 +170,55 @@ function AnalyzeContent() {
     [selectedPath],
   );
 
+  const addLog = useCallback(
+    (entry: Omit<WorkLog, "id" | "timestamp">) => {
+      setWorkLogs((prev) => [
+        {
+          ...entry,
+          id: Date.now() + Math.floor(Math.random() * 100000),
+          timestamp: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+        },
+        ...prev,
+      ]);
+    },
+    [],
+  );
+
   const handleAnalyze = useCallback(async () => {
     setError("");
+    setWorkLogs([]);
 
-    if (!isValidGitHubRepoUrl(repoUrl)) {
-      setError("请输入合法的 GitHub 仓库地址，例如：https://github.com/vercel/next.js");
+    const normalizedRepo = normalizeGitHubRepoInput(repoUrl);
+    if (!normalizedRepo) {
+      addLog({
+        level: "error",
+        title: "GitHub 地址校验",
+        message: "校验失败：输入不是合法仓库地址。",
+        jsonData: { repoUrl, valid: false },
+      });
+      setError("请输入合法仓库地址，例如 owner/repo 或 https://github.com/owner/repo");
       return;
     }
 
+    addLog({
+      level: "success",
+      title: "GitHub 地址校验",
+      message: "校验通过，开始请求仓库文件列表。",
+      jsonData: { repoUrl, normalizedRepo, valid: true },
+    });
+
     setAnalyzeLoading(true);
     setTree([]);
+    setTotalFilesCount(0);
     setCodeFilesCount(0);
+    setFilteredOutCount(0);
     setAIAnalysis(null);
     setSelectedPath("");
     setCode("");
 
     try {
       const response = await fetch(
-        `/api/repository?repoUrl=${encodeURIComponent(repoUrl)}`,
+        `/api/repository?repoUrl=${encodeURIComponent(normalizedRepo)}`,
       );
       const result = (await response.json()) as RepoAnalyzeResult & { message?: string };
 
@@ -155,18 +227,59 @@ function AnalyzeContent() {
       }
 
       setTree(result.tree);
+      setTotalFilesCount(result.totalFilesCount);
       setBranch(result.defaultBranch);
       setCodeFilesCount(result.codeFilesCount);
+      setFilteredOutCount(result.filteredOutCount);
       setAIAnalysis(result.aiAnalysis);
-      router.replace(`/analyze?repo=${encodeURIComponent(repoUrl)}`);
+      addLog({
+        level: "info",
+        title: "文件列表统计",
+        message: `仓库共 ${result.totalFilesCount} 个文件。`,
+        jsonData: {
+          totalFilesCount: result.totalFilesCount,
+          branch: result.defaultBranch,
+        },
+      });
+      addLog({
+        level: "info",
+        title: "代码文件过滤",
+        message: `保留 ${result.codeFilesCount} 个代码文件，过滤 ${result.filteredOutCount} 个非代码文件。`,
+        jsonData: {
+          codeFilesCount: result.codeFilesCount,
+          filteredOutCount: result.filteredOutCount,
+        },
+      });
+      addLog({
+        level: result.aiDebug.usedFallback ? "info" : "success",
+        title: "AI 分析结果",
+        message: result.aiDebug.usedFallback
+          ? `使用兜底分析（原因: ${result.aiDebug.reason}）。`
+          : "AI 分析完成并返回结构化结果。",
+        jsonData: {
+          debug: result.aiDebug,
+          result: result.aiAnalysis,
+        },
+      });
+      setRepoUrl(normalizedRepo);
+      router.replace(`/analyze?repo=${encodeURIComponent(normalizedRepo)}`);
     } catch (requestError) {
       const message =
-        requestError instanceof Error ? requestError.message : "仓库分析失败。";
+        requestError instanceof Error
+          ? requestError.message === "fetch failed"
+            ? "请求失败：前端无法连接本地服务，请确认 `npm run dev` 正在运行。"
+            : requestError.message
+          : "仓库分析失败。";
       setError(message);
+      addLog({
+        level: "error",
+        title: "仓库分析请求",
+        message: `请求失败：${message}`,
+      });
     } finally {
       setAnalyzeLoading(false);
     }
-  }, [repoUrl, router]);
+  }, [addLog, repoUrl, router]);
 
   const handleSelectFile = useCallback(
     async (path: string) => {
@@ -192,7 +305,11 @@ function AnalyzeContent() {
         setCode(result.content);
       } catch (requestError) {
         const message =
-          requestError instanceof Error ? requestError.message : "文件加载失败。";
+          requestError instanceof Error
+            ? requestError.message === "fetch failed"
+              ? "文件请求失败：前端无法连接本地服务，请确认 `npm run dev` 正在运行。"
+              : requestError.message
+            : "文件加载失败。";
         setError(message);
       } finally {
         setCodeLoading(false);
@@ -207,6 +324,46 @@ function AnalyzeContent() {
         <aside className="rounded-xl border border-slate-800 bg-slate-900/80 p-4">
           <p className="text-xs uppercase tracking-[0.24em] text-cyan-400">Github Review</p>
           <h1 className="mt-3 text-xl font-semibold text-white">项目分析</h1>
+          <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs uppercase tracking-[0.2em] text-cyan-400">工作日志</p>
+              <span className="text-xs text-slate-500">{workLogs.length} 条</span>
+            </div>
+            <div className="mt-2 max-h-48 space-y-2 overflow-auto pr-1">
+              {!workLogs.length ? (
+                <p className="text-xs text-slate-500">暂无日志，执行分析后会记录关键操作。</p>
+              ) : (
+                workLogs.map((log) => (
+                  <div key={log.id} className="rounded-md border border-slate-800 bg-slate-900 p-2">
+                    <p className="text-[11px] text-slate-500">{log.timestamp}</p>
+                    <p
+                      className={`mt-1 text-xs ${
+                        log.level === "error"
+                          ? "text-rose-400"
+                          : log.level === "success"
+                            ? "text-emerald-400"
+                            : "text-cyan-300"
+                      }`}
+                    >
+                      {log.title}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-300">{log.message}</p>
+                    {log.jsonData ? (
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-[11px] text-slate-400">
+                          展开查看 JSON
+                        </summary>
+                        <pre className="mt-2 overflow-auto rounded-md border border-slate-800 bg-slate-950 p-2 text-[11px] leading-5 text-slate-300">
+                          {JSON.stringify(truncateJsonLongFields(log.jsonData, 500), null, 2)}
+                        </pre>
+                      </details>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
           <p className="mt-2 text-sm text-slate-400">
             输入 GitHub 仓库地址，解析文件结构并查看源码。
           </p>
@@ -217,10 +374,10 @@ function AnalyzeContent() {
             </label>
             <input
               id="repo-url"
-              type="url"
+              type="text"
               value={repoUrl}
               onChange={(event) => setRepoUrl(event.target.value)}
-              placeholder="https://github.com/owner/repo"
+              placeholder="owner/repo 或 https://github.com/owner/repo"
               className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500"
             />
             <button
@@ -242,7 +399,10 @@ function AnalyzeContent() {
               <div>
                 <p className="text-xs uppercase tracking-[0.2em] text-cyan-400">AI 分析结果</p>
                 <p className="mt-1 text-xs text-slate-500">
-                  代码文件数: {codeFilesCount} | 模型: {aiAnalysis.model}
+                  文件总数: {totalFilesCount} | 代码文件: {codeFilesCount} | 过滤: {filteredOutCount}
+                </p>
+                <p className="text-xs text-slate-500">
+                  模型: {aiAnalysis.model}
                 </p>
               </div>
 

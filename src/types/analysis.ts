@@ -21,3 +21,16 @@ export type ProjectAIAnalysis = {
   summary: string;
   model: string;
 };
+
+export type AIAnalysisDebug = {
+  enabled: boolean;
+  usedFallback: boolean;
+  reason: string;
+  request: unknown | null;
+  response: unknown | null;
+};
+
+export type ProjectAIAnalysisResult = {
+  analysis: ProjectAIAnalysis;
+  debug: AIAnalysisDebug;
+};

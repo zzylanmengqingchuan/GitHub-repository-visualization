@@ -1,6 +1,6 @@
 "use client";
 
-import { isValidGitHubRepoUrl } from "@/lib/github-url";
+import { normalizeGitHubRepoInput } from "@/lib/github-url";
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
@@ -13,12 +13,13 @@ export default function Home() {
     event.preventDefault();
     setError("");
 
-    if (!isValidGitHubRepoUrl(repoUrl)) {
-      setError("请输入合法的 GitHub 仓库地址，例如：https://github.com/vercel/next.js");
+    const normalizedRepo = normalizeGitHubRepoInput(repoUrl);
+    if (!normalizedRepo) {
+      setError("请输入合法仓库地址，例如 owner/repo 或 https://github.com/owner/repo");
       return;
     }
 
-    router.push(`/analyze?repo=${encodeURIComponent(repoUrl)}`);
+    router.push(`/analyze?repo=${encodeURIComponent(normalizedRepo)}`);
   };
 
   return (
@@ -41,10 +42,10 @@ export default function Home() {
 
         <form onSubmit={handleSubmit} className="mt-7 space-y-3">
           <input
-            type="url"
+            type="text"
             value={repoUrl}
             onChange={(event) => setRepoUrl(event.target.value)}
-            placeholder="https://github.com/owner/repo"
+            placeholder="owner/repo 或 https://github.com/owner/repo"
             className="w-full rounded-xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-500 md:text-base"
           />
           <button
