@@ -1,7 +1,12 @@
 "use client";
 
 import { normalizeGitHubRepoInput } from "@/lib/github-url";
-import type { AIAnalysisDebug, ProjectAIAnalysis } from "@/types/analysis";
+import type {
+  AIAnalysisDebug,
+  EntryFileReviewDebug,
+  ProjectAIAnalysis,
+  ProjectEntryAnalysis,
+} from "@/types/analysis";
 import type { FileTreeNode } from "@/types/repository";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useMemo, useState } from "react";
@@ -18,6 +23,8 @@ type RepoAnalyzeResult = {
   filteredOutCount: number;
   aiAnalysis: ProjectAIAnalysis;
   aiDebug: AIAnalysisDebug;
+  entryAnalysis: ProjectEntryAnalysis;
+  entryDebug: EntryFileReviewDebug[];
 };
 
 type WorkLog = {
@@ -32,6 +39,7 @@ type WorkLog = {
 type DetailPreviewProps = {
   logs: WorkLog[];
   aiAnalysis: ProjectAIAnalysis | null;
+  entryAnalysis: ProjectEntryAnalysis | null;
   totalFilesCount: number;
   codeFilesCount: number;
   filteredOutCount: number;
@@ -96,6 +104,32 @@ function truncateJsonLongFields(value: unknown, maxChars = 500): unknown {
   return value;
 }
 
+function humanizeReasonCode(reason: string): string {
+  const map: Record<string, string> = {
+    no_code_files: "仓库中没有可分析的代码文件",
+    missing_openai_api_key: "未配置 OPENAI_API_KEY，已改用本地规则分析",
+    openai_call_exception: "OpenAI 请求异常，已改用本地规则分析",
+    empty_ai_content: "OpenAI 未返回可解析内容，已改用本地规则分析",
+    ok: "调用成功",
+    missing_gemini_api_key: "未配置 GEMINI_API_KEY，已改用本地规则研判入口",
+    gemini_empty_content: "Gemini 未返回可解析内容，已改用本地规则研判入口",
+  };
+
+  if (map[reason]) {
+    return map[reason];
+  }
+
+  if (reason.startsWith("openai_http_")) {
+    return `OpenAI 接口返回 ${reason.replace("openai_http_", "")} 状态码，已改用本地规则分析`;
+  }
+
+  if (reason.startsWith("gemini_http_")) {
+    return `Gemini 接口返回 ${reason.replace("gemini_http_", "")} 状态码，已改用本地规则研判入口`;
+  }
+
+  return reason;
+}
+
 function buildAnalysisSummary(analysis: ProjectAIAnalysis): string {
   const langs = analysis.mainLanguages
     .slice(0, 3)
@@ -116,14 +150,41 @@ function buildAnalysisSummary(analysis: ProjectAIAnalysis): string {
 
 function buildAIDetailMessage(debug: AIAnalysisDebug, analysis: ProjectAIAnalysis): string {
   if (!debug.enabled) {
-    return "未调用在线 AI，使用本地规则分析（常见原因：未配置 OPENAI_API_KEY 或无可分析代码文件）。";
+    return `未调用在线 AI。${humanizeReasonCode(debug.reason)}。当前分析结论为：${buildAnalysisSummary(analysis)}`;
   }
 
   if (debug.usedFallback) {
-    return `在线 AI 调用未得到可用结果，已自动切换到本地规则分析。原因码：${debug.reason}。分析输出为：${buildAnalysisSummary(analysis)}`;
+    return `在线 AI 未得到可用结果。${humanizeReasonCode(debug.reason)}。当前分析结论为：${buildAnalysisSummary(analysis)}`;
   }
 
-  return `在线 AI 调用成功。已输出结构化结论：${buildAnalysisSummary(analysis)}`;
+  return `在线 AI 调用成功。当前分析结论为：${buildAnalysisSummary(analysis)}`;
+}
+
+function buildEntryReviewMessage(
+  review: ProjectEntryAnalysis["reviewedCandidates"][number],
+  debug: EntryFileReviewDebug | undefined,
+): string {
+  const strategy =
+    review.contentStrategy.mode === "full"
+      ? `文件共 ${review.contentStrategy.totalLines} 行，已完整发送给模型`
+      : `文件共 ${review.contentStrategy.totalLines} 行，已发送前后各 2000 行，共 ${review.contentStrategy.sentLines} 行`;
+  const modelResult = review.isEntry
+    ? `模型判断它是入口文件，置信度 ${Math.round(review.confidence * 100)}%`
+    : `模型判断它不是入口文件，置信度 ${Math.round(review.confidence * 100)}%`;
+  const reason = debug ? humanizeReasonCode(debug.reason) : "未记录调试原因";
+  return `${strategy}；${modelResult}；原因：${review.reason}；调用状态：${reason}。`;
+}
+
+function buildEntrySummary(entryAnalysis: ProjectEntryAnalysis): string {
+  if (entryAnalysis.confirmedEntryFile) {
+    return `已确认入口文件为 ${entryAnalysis.confirmedEntryFile.path}。${entryAnalysis.confirmedEntryFile.reason}`;
+  }
+
+  if (entryAnalysis.reviewedCandidates.length) {
+    return `已依次研判 ${entryAnalysis.reviewedCandidates.length} 个候选文件，但暂未确认真实入口文件。`;
+  }
+
+  return "没有可研判的候选入口文件。";
 }
 
 type TreeNodeProps = {
@@ -187,6 +248,7 @@ function TreeNode({ node, selectedPath, onSelectFile, level = 0 }: TreeNodeProps
 function DetailPreviewModal({
   logs,
   aiAnalysis,
+  entryAnalysis,
   totalFilesCount,
   codeFilesCount,
   filteredOutCount,
@@ -248,41 +310,32 @@ function DetailPreviewModal({
           </section>
 
           <section className="min-h-0 rounded-xl border border-slate-800 bg-slate-950/60 p-4">
-            <h3 className="text-base font-semibold text-white">AI 分析详情</h3>
-            {!aiAnalysis ? (
-              <p className="mt-3 text-sm text-slate-500">暂无 AI 分析结果</p>
-            ) : (
-              <div className="mt-3 h-[calc(100%-2.5rem)] space-y-4 overflow-auto pr-1">
-                <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
-                  <p>文件总数: {totalFilesCount}</p>
-                  <p>代码文件: {codeFilesCount}</p>
-                  <p>过滤文件: {filteredOutCount}</p>
-                  <p>模型: {aiAnalysis.model}</p>
-                </div>
-                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
-                  <p className="text-sm text-slate-400">主要语言</p>
-                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
-                    {JSON.stringify(aiAnalysis.mainLanguages, null, 2)}
-                  </pre>
-                </div>
-                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
-                  <p className="text-sm text-slate-400">技术栈标签</p>
-                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
-                    {JSON.stringify(aiAnalysis.techStackTags, null, 2)}
-                  </pre>
-                </div>
-                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
-                  <p className="text-sm text-slate-400">可能入口文件</p>
-                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
-                    {JSON.stringify(aiAnalysis.possibleEntryFiles, null, 2)}
-                  </pre>
-                </div>
-                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
-                  <p className="text-sm text-slate-400">总结</p>
-                  <p className="mt-2 text-sm text-slate-300">{aiAnalysis.summary}</p>
-                </div>
+            <h3 className="text-base font-semibold text-white">分析详情</h3>
+            <div className="mt-3 h-[calc(100%-2.5rem)] space-y-4 overflow-auto pr-1">
+              <div className="rounded-md border border-slate-800 bg-slate-900 p-3 text-sm text-slate-300">
+                <p>文件总数: {totalFilesCount}</p>
+                <p>代码文件: {codeFilesCount}</p>
+                <p>过滤文件: {filteredOutCount}</p>
+                <p>技术栈模型: {aiAnalysis?.model ?? "-"}</p>
+                <p>入口研判模型: {entryAnalysis?.model ?? "-"}</p>
               </div>
-            )}
+              {aiAnalysis ? (
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                  <p className="text-sm text-slate-400">技术栈分析</p>
+                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
+                    {JSON.stringify(aiAnalysis, null, 2)}
+                  </pre>
+                </div>
+              ) : null}
+              {entryAnalysis ? (
+                <div className="rounded-md border border-slate-800 bg-slate-900 p-3">
+                  <p className="text-sm text-slate-400">入口研判</p>
+                  <pre className="mt-2 overflow-auto rounded-md bg-slate-950 p-3 text-xs text-slate-300">
+                    {JSON.stringify(entryAnalysis, null, 2)}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
           </section>
         </div>
       </div>
@@ -307,6 +360,7 @@ function AnalyzeContent() {
   const [codeFilesCount, setCodeFilesCount] = useState(0);
   const [filteredOutCount, setFilteredOutCount] = useState(0);
   const [aiAnalysis, setAIAnalysis] = useState<ProjectAIAnalysis | null>(null);
+  const [entryAnalysis, setEntryAnalysis] = useState<ProjectEntryAnalysis | null>(null);
   const [workLogs, setWorkLogs] = useState<WorkLog[]>([]);
   const [showDetailPreview, setShowDetailPreview] = useState(false);
 
@@ -316,19 +370,16 @@ function AnalyzeContent() {
     [selectedPath],
   );
 
-  const addLog = useCallback(
-    (entry: Omit<WorkLog, "id" | "timestamp">) => {
-      setWorkLogs((prev) => [
-        {
-          ...entry,
-          id: Date.now() + Math.floor(Math.random() * 100000),
-          timestamp: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
-        },
-        ...prev,
-      ]);
-    },
-    [],
-  );
+  const addLog = useCallback((entry: Omit<WorkLog, "id" | "timestamp">) => {
+    setWorkLogs((prev) => [
+      {
+        ...entry,
+        id: Date.now() + Math.floor(Math.random() * 100000),
+        timestamp: new Date().toLocaleTimeString("zh-CN", { hour12: false }),
+      },
+      ...prev,
+    ]);
+  }, []);
 
   const handleAnalyze = useCallback(async () => {
     setError("");
@@ -359,13 +410,12 @@ function AnalyzeContent() {
     setCodeFilesCount(0);
     setFilteredOutCount(0);
     setAIAnalysis(null);
+    setEntryAnalysis(null);
     setSelectedPath("");
     setCode("");
 
     try {
-      const response = await fetch(
-        `/api/repository?repoUrl=${encodeURIComponent(normalizedRepo)}`,
-      );
+      const response = await fetch(`/api/repository?repoUrl=${encodeURIComponent(normalizedRepo)}`);
       const result = (await response.json()) as RepoAnalyzeResult & { message?: string };
 
       if (!response.ok) {
@@ -378,15 +428,18 @@ function AnalyzeContent() {
       setCodeFilesCount(result.codeFilesCount);
       setFilteredOutCount(result.filteredOutCount);
       setAIAnalysis(result.aiAnalysis);
+      setEntryAnalysis(result.entryAnalysis);
+
       addLog({
         level: "info",
         title: "文件列表统计",
-        message: `仓库共 ${result.totalFilesCount} 个文件。`,
+        message: `仓库共 ${result.totalFilesCount} 个文件，默认分支为 ${result.defaultBranch}。`,
         jsonData: {
           totalFilesCount: result.totalFilesCount,
           branch: result.defaultBranch,
         },
       });
+
       addLog({
         level: "info",
         title: "代码文件过滤",
@@ -396,30 +449,54 @@ function AnalyzeContent() {
           filteredOutCount: result.filteredOutCount,
         },
       });
+
       addLog({
         level: result.aiDebug.usedFallback ? "info" : "success",
-        title: "AI 分析结果",
+        title: "技术栈与候选入口分析",
         message: buildAIDetailMessage(result.aiDebug, result.aiAnalysis),
         jsonData: {
           debug: result.aiDebug,
           result: result.aiAnalysis,
         },
       });
+
       addLog({
         level: "info",
-        title: "AI 调用详情",
-        message: `请求包含模型、指令、文件采样列表；响应包含结构化字段(mainLanguages/techStackTags/possibleEntryFiles/summary)。当前原因码：${result.aiDebug.reason}。`,
+        title: "技术栈 AI 调用详情",
+        message: `请求体包含模型、系统指令、代码文件采样列表；响应体包含 mainLanguages、techStackTags、possibleEntryFiles、summary。当前状态：${humanizeReasonCode(result.aiDebug.reason)}。`,
         jsonData: {
           explanation: {
-            request:
-              "请求中会包含：模型参数、系统指令、用户提示词、采样后的代码文件路径列表。",
-            response:
-              "响应中应包含：主要语言(mainLanguages)、技术栈标签(techStackTags)、可能入口文件(possibleEntryFiles)、总结(summary)。",
+            request: "请求里包含仓库地址、采样后的代码文件路径、输出 JSON 模板与模型参数。",
+            response: "响应里包含主要编程语言、技术栈标签、候选入口文件和整体总结。",
           },
           request: result.aiDebug.request,
           response: result.aiDebug.response,
         },
       });
+
+      result.entryAnalysis.reviewedCandidates.forEach((review, index) => {
+        const debug = result.entryDebug[index];
+        addLog({
+          level: review.isEntry ? "success" : "info",
+          title: `入口文件研判 ${index + 1}`,
+          message: buildEntryReviewMessage(review, debug),
+          jsonData: {
+            candidate: review,
+            debug,
+          },
+        });
+      });
+
+      addLog({
+        level: result.entryAnalysis.confirmedEntryFile ? "success" : "info",
+        title: "入口研判结论",
+        message: buildEntrySummary(result.entryAnalysis),
+        jsonData: {
+          analysis: result.entryAnalysis,
+          debug: result.entryDebug,
+        },
+      });
+
       setRepoUrl(normalizedRepo);
       router.replace(`/analyze?repo=${encodeURIComponent(normalizedRepo)}`);
     } catch (requestError) {
@@ -479,7 +556,7 @@ function AnalyzeContent() {
 
   return (
     <main className="min-h-screen bg-slate-950 p-4 text-slate-100 md:p-6">
-      <div className="mx-auto grid min-h-[calc(100vh-2rem)] max-w-[1800px] grid-cols-1 gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 backdrop-blur md:grid-cols-[280px_360px_1fr] md:gap-5 md:p-5">
+      <div className="mx-auto grid min-h-[calc(100vh-2rem)] max-w-[1800px] grid-cols-1 gap-4 rounded-2xl border border-slate-800 bg-slate-900/70 p-4 backdrop-blur md:grid-cols-[320px_360px_1fr] md:gap-5 md:p-5">
         <aside className="rounded-xl border border-slate-800 bg-slate-900/80 p-4">
           <p className="text-xs uppercase tracking-[0.24em] text-cyan-400">Github Review</p>
           <h1 className="mt-3 text-xl font-semibold text-white">项目分析</h1>
@@ -497,7 +574,7 @@ function AnalyzeContent() {
                 </button>
               </div>
             </div>
-            <div className="mt-2 max-h-48 space-y-2 overflow-auto pr-1">
+            <div className="mt-2 max-h-56 space-y-2 overflow-auto pr-1">
               {!workLogs.length ? (
                 <p className="text-xs text-slate-500">暂无日志，执行分析后会记录关键操作。</p>
               ) : (
@@ -515,7 +592,7 @@ function AnalyzeContent() {
                     >
                       {log.title}
                     </p>
-                    <p className="mt-1 text-xs text-slate-300">{log.message}</p>
+                    <p className="mt-1 text-xs leading-5 text-slate-300">{log.message}</p>
                     {log.jsonData ? (
                       <details className="mt-2">
                         <summary className="cursor-pointer text-[11px] text-slate-400">
@@ -532,9 +609,7 @@ function AnalyzeContent() {
             </div>
           </div>
 
-          <p className="mt-2 text-sm text-slate-400">
-            输入 GitHub 仓库地址，解析文件结构并查看源码。
-          </p>
+          <p className="mt-2 text-sm text-slate-400">输入 GitHub 仓库地址，解析文件结构并查看源码。</p>
 
           <div className="mt-5 space-y-3">
             <label className="block text-xs text-slate-400" htmlFor="repo-url">
@@ -558,9 +633,12 @@ function AnalyzeContent() {
             </button>
           </div>
 
-          <div className="mt-6 rounded-lg border border-dashed border-slate-700 p-3 text-xs text-slate-500">
-            预留区域：后续可展示依赖信息、代码统计、风险提示等。
-          </div>
+          {entryAnalysis ? (
+            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+              <p className="text-xs uppercase tracking-[0.2em] text-cyan-400">入口研判结论</p>
+              <p className="mt-2 text-xs leading-5 text-slate-300">{buildEntrySummary(entryAnalysis)}</p>
+            </div>
+          ) : null}
 
           {aiAnalysis ? (
             <div className="mt-4 space-y-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
@@ -569,9 +647,7 @@ function AnalyzeContent() {
                 <p className="mt-1 text-xs text-slate-500">
                   文件总数: {totalFilesCount} | 代码文件: {codeFilesCount} | 过滤: {filteredOutCount}
                 </p>
-                <p className="text-xs text-slate-500">
-                  模型: {aiAnalysis.model}
-                </p>
+                <p className="text-xs text-slate-500">技术栈模型: {aiAnalysis.model}</p>
               </div>
 
               <div>
@@ -608,7 +684,7 @@ function AnalyzeContent() {
               </div>
 
               <div>
-                <p className="text-xs text-slate-400">可能入口文件</p>
+                <p className="text-xs text-slate-400">候选入口文件</p>
                 <div className="mt-1 space-y-2 text-xs">
                   {aiAnalysis.possibleEntryFiles.length ? (
                     aiAnalysis.possibleEntryFiles.map((item) => (
@@ -689,6 +765,7 @@ function AnalyzeContent() {
         <DetailPreviewModal
           logs={workLogs}
           aiAnalysis={aiAnalysis}
+          entryAnalysis={entryAnalysis}
           totalFilesCount={totalFilesCount}
           codeFilesCount={codeFilesCount}
           filteredOutCount={filteredOutCount}

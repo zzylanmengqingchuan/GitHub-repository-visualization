@@ -1,4 +1,5 @@
 import { getRepositoryTreeByUrl } from "@/lib/github";
+import { analyzeProjectEntryFiles } from "@/lib/entry-analysis";
 import {
   analyzeProjectFromFileList,
   countAllFiles,
@@ -22,6 +23,13 @@ export async function GET(request: NextRequest) {
     const totalFilesCount = countAllFiles(result.tree);
     const codeFiles = extractCodeFilePaths(result.tree);
     const aiResult = await analyzeProjectFromFileList(repoUrl, codeFiles);
+    const entryResult = await analyzeProjectEntryFiles({
+      repoUrl,
+      branch: result.defaultBranch,
+      projectSummary: aiResult.analysis.summary,
+      mainLanguages: aiResult.analysis.mainLanguages,
+      possibleEntryFiles: aiResult.analysis.possibleEntryFiles,
+    });
 
     return NextResponse.json({
       ...result,
@@ -30,12 +38,13 @@ export async function GET(request: NextRequest) {
       filteredOutCount: Math.max(0, totalFilesCount - codeFiles.length),
       aiAnalysis: aiResult.analysis,
       aiDebug: aiResult.debug,
+      entryAnalysis: entryResult.analysis,
+      entryDebug: entryResult.debug,
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "仓库分析失败，请稍后重试。";
 
-    // 根据错误类型返回不同的状态码
     let status = 500;
     if (message.includes("不存在")) {
       status = 404;
@@ -49,9 +58,7 @@ export async function GET(request: NextRequest) {
       status = 502;
     }
 
-    // 在开发环境下输出详细错误日志
     console.error("[API /repository] Error:", message);
-
     return NextResponse.json({ message }, { status });
   }
 }
